@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use std::cell::RefCell;
 use std::error::Error;
 use std::ffi::OsString;
@@ -5,6 +7,11 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
+
+use nwg::stretch::geometry::Rect;
+use nwg::stretch::style::{Dimension, FlexDirection};
+
+static HEADER_BITMAP: &[u8] = include_bytes!("../assets/header.png");
 
 fn main() -> Result<(), Box<dyn Error>> {
     nwg::init().expect("Failed to init Native Windows GUI");
@@ -20,6 +27,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     nwg::Font::set_global_default(Some(font));
 
     let mut window = nwg::Window::default();
+    let mut container = nwg::Frame::default();
+    let container_grid = nwg::FlexboxLayout::default();
+
+    let header_bitmap = nwg::Bitmap::from_bin(HEADER_BITMAP)?;
+    let mut header_frame = nwg::ImageFrame::default();
 
     let video_path = RefCell::new(String::from(""));
     let mut video_label = nwg::Label::default();
@@ -32,39 +44,70 @@ fn main() -> Result<(), Box<dyn Error>> {
     let combine_sub_button = Rc::new(RefCell::new(nwg::Button::default()));
 
     nwg::Window::builder()
-        .size((600, 100))
-        .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE)
+        .size((600, 260))
+        .flags(nwg::WindowFlags::WINDOW)
         .title("KWH Tool")
         .build(&mut window)?;
 
-    nwg::Button::builder()
+    nwg::ImageFrame::builder()
         .parent(&window)
+        .bitmap(Some(&header_bitmap))
+        .build(&mut header_frame)?;
+
+    nwg::Frame::builder()
+        .parent(&window)
+        .flags(nwg::FrameFlags::VISIBLE)
+        .build(&mut container)?;
+
+    nwg::ImageFrame::builder()
+        .parent(&window)
+        .bitmap(Some(&header_bitmap))
+        .build(&mut header_frame)?;
+
+    nwg::FlexboxLayout::builder()
+        .parent(&window)
+        .flex_direction(FlexDirection::Column)
+        .padding(Rect {
+            start: Dimension::Points(0.0),
+            end: Dimension::Points(0.0),
+            top: Dimension::Points(0.0),
+            bottom: Dimension::Points(0.0),
+        })
+        .child(&header_frame)
+        .child_flex_grow(1.0)
+        .child(&container)
+        .child_flex_grow(1.0)
+        .build(&container_grid)?;
+
+    nwg::Button::builder()
+        .parent(&container)
         .text("Open Video")
         .build(&mut open_video_button)?;
 
     nwg::Label::builder()
-        .parent(&window)
+        .parent(&container)
         .text("Not selected")
         .build(&mut video_label)?;
 
     nwg::Button::builder()
-        .parent(&window)
+        .parent(&container)
         .text("Open Subtitle")
         .build(&mut open_sub_button)?;
 
     nwg::Label::builder()
-        .parent(&window)
+        .parent(&container)
         .text("Not selected")
         .build(&mut sub_label)?;
 
     nwg::Button::builder()
-        .parent(&window)
+        .parent(&container)
         .text("Render")
+        .enabled(false)
         .build(&mut combine_sub_button.borrow_mut())?;
 
     let grid = nwg::GridLayout::default();
     nwg::GridLayout::builder()
-        .parent(&window)
+        .parent(&container)
         .spacing(1)
         .child(0, 0, &open_video_button)
         .child(1, 0, &video_label)
@@ -72,6 +115,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .child(1, 1, &sub_label)
         .child_item(nwg::GridLayoutItem::new(&*(combine_sub_button).borrow(), 0, 2, 2, 1))
         .build(&grid)?;
+
+    window.set_visible(true);
 
     let window = Rc::new(window);
     let events_window = window.clone();
@@ -101,6 +146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if let Ok(path) = video_file.get_selected_item() {
                             *video_path.borrow_mut() = path.to_str().unwrap().to_string();
                             video_label.set_text(trim_path(path).as_str());
+                            handler_sub_button.borrow_mut().set_enabled(true);
                         }
                     }
                 } else if &handle == &open_sub_button.handle {

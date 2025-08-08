@@ -3,15 +3,26 @@
 use std::cell::RefCell;
 use std::error::Error;
 use std::ffi::OsString;
-use std::process::Command;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
+use mp4::Mp4Reader;
 use nwg::stretch::geometry::Rect;
 use nwg::stretch::style::{Dimension, FlexDirection};
+use winapi::um::winbase::CREATE_NO_WINDOW;
 
 static HEADER_BITMAP: &[u8] = include_bytes!("../assets/header.png");
+
+enum FfmpegProgress {
+    Progress(u32),
+    Done,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     nwg::init().expect("Failed to init Native Windows GUI");
@@ -33,7 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let header_bitmap = nwg::Bitmap::from_bin(HEADER_BITMAP)?;
     let mut header_frame = nwg::ImageFrame::default();
 
-    let video_path = RefCell::new(String::from(""));
+    let video_path = Rc::new(RefCell::new(String::from("")));
     let mut video_label = nwg::Label::default();
     let mut open_video_button = nwg::Button::default();
 
@@ -43,8 +54,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let combine_sub_button = Rc::new(RefCell::new(nwg::Button::default()));
 
+    let video_duration = Rc::new(RefCell::new(Duration::default()));
+
+    let progress_bar = Rc::new(RefCell::new(nwg::ProgressBar::default()));
+
     nwg::Window::builder()
-        .size((600, 260))
+        .size((600, 270))
         .flags(nwg::WindowFlags::WINDOW)
         .title("KWH Tool")
         .build(&mut window)?;
@@ -105,6 +120,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .enabled(false)
         .build(&mut combine_sub_button.borrow_mut())?;
 
+    nwg::ProgressBar::builder()
+        .parent(&container)
+        .build(&mut progress_bar.borrow_mut())?;
+    progress_bar.borrow().set_visible(false);
+
     let grid = nwg::GridLayout::default();
     nwg::GridLayout::builder()
         .parent(&container)
@@ -114,6 +134,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .child(0, 1, &open_sub_button)
         .child(1, 1, &sub_label)
         .child_item(nwg::GridLayoutItem::new(&*(combine_sub_button).borrow(), 0, 2, 2, 1))
+        .child_item(nwg::GridLayoutItem::new(&*(progress_bar).borrow(), 0, 3, 2, 1))
         .build(&grid)?;
 
     window.set_visible(true);
@@ -122,6 +143,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let events_window = window.clone();
 
     let handler_sub_button = Rc::clone(&combine_sub_button);
+    let duration_clone = Rc::clone(&video_duration);
+    let progress_bar_clone = Rc::clone(&progress_bar);
     let handler = nwg::full_bind_event_handler(&window.handle, move |evt, _evt_data, handle| {
         use nwg::Event as E;
 
@@ -147,6 +170,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                             *video_path.borrow_mut() = path.to_str().unwrap().to_string();
                             video_label.set_text(trim_path(path).as_str());
                             handler_sub_button.borrow_mut().set_enabled(true);
+
+                            let path = Rc::clone(&video_path);
+                            let mp4_file = File::open(&*path.borrow()).unwrap();
+                            let size = mp4_file.metadata().unwrap().len();
+                            let reader = BufReader::new(mp4_file);
+
+                            let mp4_header = Mp4Reader::read_header(reader, size).unwrap();
+                            let duration = mp4_header.duration();
+                            progress_bar_clone.borrow().set_range(0..duration.as_millis() as u32);
+                            *duration_clone.borrow_mut() = duration;
                         }
                     }
                 } else if &handle == &open_sub_button.handle {
@@ -189,10 +222,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         handler_sub_button.borrow().set_text("Rendering...");
                         handler_sub_button.borrow().set_enabled(false);
 
+                        progress_bar_clone.borrow().set_visible(true);
+
                         let tx = tx.clone();
                         thread::spawn(move || {
                             let mut ffmpeg_process = Command::new("ffmpeg")
                                 .arg("-y")
+                                .arg("-progress").arg("pipe:2")
                                 .arg("-i").arg(video_path)
                                 .arg("-vf").arg(format!("ass=\'{}\'", sub_path.replace('\\', "/")).replace(':', "\\:"))
                                 .arg("-crf").arg("18")
@@ -201,10 +237,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .arg("-c:v").arg("libx264")
                                 .arg("-c:a").arg("copy")
                                 .arg(saved_path)
+                                .creation_flags(CREATE_NO_WINDOW)
+                                .stderr(Stdio::piped())
                                 .spawn().unwrap();
 
+                            let stderr = ffmpeg_process.stderr.take().unwrap();
+                            let reader = BufReader::new(stderr);
+
+                            for line in reader.lines() {
+                                if let Ok(line) = line {
+                                    if line.contains("out_time_ms") {
+                                        let ffmpeg_time = &line[12..];
+                                        let ffmpeg_time_num = ffmpeg_time.parse::<u32>().unwrap();
+
+                                        tx.send(FfmpegProgress::Progress(ffmpeg_time_num/1000)).unwrap();
+                                    }
+                                }
+                            }
+
                             ffmpeg_process.wait().unwrap();
-                            tx.send(1).unwrap();
+                            tx.send(FfmpegProgress::Done).unwrap();
                         });
                     }
 
@@ -215,10 +267,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let sub_button = Rc::clone(&combine_sub_button);
+    let progress_bar_clone = Rc::clone(&progress_bar);
     nwg::dispatch_thread_events_with_callback(move || {
-        if rx.try_recv().is_ok() {
-            sub_button.borrow().set_text("Render");
-            sub_button.borrow().set_enabled(true);
+        if let Ok(progress) = rx.try_recv() {
+            match progress {
+                FfmpegProgress::Progress(ffmpeg_time) => {
+                    progress_bar_clone.borrow().set_pos(ffmpeg_time);
+                }
+                FfmpegProgress::Done => {
+                    sub_button.borrow().set_text("Render");
+                    sub_button.borrow().set_enabled(true);
+                    progress_bar_clone.borrow().set_pos(0);
+                    progress_bar_clone.borrow().set_visible(false);
+                }
+            }
         }
     });
     nwg::unbind_event_handler(&handler);

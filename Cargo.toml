@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-nwg = {version = "^1.0.12", package = "native-windows-gui"}
+nwg = { version = "^1.0.12", package = "native-windows-gui" }
 winapi = "0.3.9"
+mp4 = "0.14.0"

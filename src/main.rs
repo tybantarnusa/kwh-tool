@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
 use std::cell::RefCell;
 use std::error::Error;
@@ -172,7 +172,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             handler_sub_button.borrow_mut().set_enabled(true);
 
                             let path = Rc::clone(&video_path);
-                            let mp4_file = File::open(&*path.borrow()).unwrap();
+                            let mp4_file = Box::new(File::open(&*path.borrow()).unwrap());
                             let size = mp4_file.metadata().unwrap().len();
                             let reader = BufReader::new(mp4_file);
 
@@ -289,6 +289,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn trim_path(path: OsString) -> String {
+    if path.len() < 40 {
+        return path.to_str().unwrap().to_string();
+    }
+
     let path = path.to_str().unwrap();
     let mut trimmed_path_str = "...".to_string();
     trimmed_path_str.push_str(&path[path.len() - 40..].to_string());
